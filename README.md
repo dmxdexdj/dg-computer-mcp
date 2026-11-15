@@ -1,60 +1,68 @@
 # DG Computer MCP
 
-A Model Context Protocol (MCP) server that exposes Windows desktop-control tools to a trusted MCP client over standard input/output (stdio).
+Generic Windows desktop-control MCP server with invitation-only customer accounts and per-account device ownership.
 
-## Features
+## Components
 
-- Capture screenshots and inspect the active window
-- Move, click and scroll the mouse; type text and send key presses
-- List and focus application windows
-- Open applications and URLs
-- Inspect processes and optionally terminate them
-- Read and write UTF-8 files
-- Run PowerShell and Command Prompt commands when explicitly enabled
-- Read and set the clipboard
+- `index.mjs`: local MCP server. Desktop actions execute on the Windows machine.
+- `client/agent.mjs`: outbound authenticated WebSocket client. Reports online status and heartbeats to the gateway.
+- `gateway/server.mjs`: account authentication, invitation redemption, device ownership, presence and revocation service.
+- `gateway/account.html`: customer account and device-management page.
+- `scripts/admin.mjs`: administrator CLI for invitations, account provisioning and device administration.
+- `SKILL.md`: generic agent skill and installation instructions.
 
-## Requirements
+## Customer workflow
 
-- Windows 10 or later
-- Node.js 20 or later
-- An MCP-compatible client
+1. Administrator creates a one-time invitation: `node scripts/admin.mjs invite "Customer name"`.
+2. Customer visits `https://computer.danielslefhosted.xyz/`, redeems the invitation and creates a username/password.
+3. Customer signs in and selects **Add a computer**. The gateway issues a Client ID and one-time Client Secret belonging to that account.
+4. Customer runs the PowerShell installer on that Windows PC and enters those device credentials.
+5. The account page lists only that account's computers and can revoke only those devices.
 
-## Setup
+Accounts are invitation-only. Do not give customers the global administrator token. Admin operations are separate from customer account APIs.
 
-1. Clone this repository.
-2. Install dependencies with `npm install`.
-3. Copy `config.example.json` to `config.json` if you want to change the defaults.
-4. Configure your MCP client to launch `node /absolute/path/to/index.mjs` using the stdio transport.
+## Administrator commands
 
-Example MCP client configuration (adjust the path for your machine):
-
-```json
-{
-  "mcpServers": {
-    "dg-computer": {
-      "command": "node",
-      "args": ["C:/path/to/DGComputerMCP/index.mjs"]
-    }
-  }
-}
+```bash
+export DG_ADMIN_TOKEN='the-server-admin-token'
+node scripts/admin.mjs invite "Customer label"
+node scripts/admin.mjs create-user owner "Account Owner"
+node scripts/admin.mjs users
+node scripts/admin.mjs clients
+node scripts/admin.mjs assign dgc_CLIENTID owner
+node scripts/admin.mjs revoke dgc_CLIENTID
 ```
 
-## Security
+`invite` returns a one-time code valid for seven days. `create-user` is for bootstrapping or administrator-created accounts and returns a temporary password shown once; the user must change it after signing in. `assign` is for migrating an existing device to an account. `reset-password` revokes the user's sessions and forces a password change. `disable-user` disables login and revokes all of that user's devices. Customer device creation is done from the account page.
 
-**This server can control your Windows session. Only connect it to MCP clients and models you trust.** Mouse and keyboard tools can interact with open applications, and the file, clipboard, process, and command tools can access or change data on the host.
+## Gateway deployment
 
-For safety, shell execution, file writing, and process termination are disabled by default. To enable an individual capability, set its corresponding value to `true` in a local `config.json`. Do not commit that local file. For example:
+Node.js 20+ is required.
 
-```json
-{
-  "allowShell": true,
-  "allowFileWrite": false,
-  "allowProcessKill": false
-}
+```bash
+DG_ADMIN_TOKEN="$(openssl rand -hex 32)" DG_PORT=8422 node gateway/server.mjs
 ```
 
-This server uses stdio and does not implement its own network listener or authentication layer. Do not expose it through an unauthenticated network bridge.
+For production, store `DG_ADMIN_TOKEN` in a protected environment file and run the gateway under systemd behind TLS termination or Cloudflare Tunnel. The gateway binds to `127.0.0.1` by default. The JSON database should be readable only by the gateway service account.
 
-## License
+## Windows installation
 
-No license has been specified yet. All rights are reserved by default.
+After signing in and creating a device in the customer account page, run this in PowerShell:
+
+```powershell
+curl.exe -fsSL https://computer.danielslefhosted.xyz/install.ps1 | powershell.exe -NoProfile -ExecutionPolicy Bypass -Command -
+```
+
+The installer downloads the source, installs dependencies, writes local device credentials, creates an MCP configuration snippet and registers a per-user scheduled task for the gateway connection.
+
+## Isolation and current limitations
+
+- User-facing device APIs derive the account from its authenticated session; requests cannot specify another user's account ID.
+- A customer can list, create and revoke only devices whose `ownerUserId` matches their account.
+- Device WebSocket authentication rejects unowned devices.
+- The global admin token is not a customer credential.
+- The gateway does not currently proxy desktop-control traffic. Screenshots, keystrokes, files, clipboard data and shell commands remain local to each Windows MCP process. Any future command relay must check account ownership before dispatch.
+
+## Safety defaults
+
+Shell execution, file writes and process termination are disabled by default. The local MCP server uses stdio. Never expose it directly to the internet.
